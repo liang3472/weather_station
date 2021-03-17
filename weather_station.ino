@@ -6,9 +6,12 @@
 #include <TJpg_Decoder.h>
 #include <TFT_eSPI.h> // Graphics and font library for ILI9341 driver chip
 #include <SPI.h>
+#include <time.h>
 #include "logo.h"
 #include "weathericons.h"
 #include "settings.h"
+#include "moonicon.h"
+#include "Ephemeris.h"
 
 #define INIT_WIFI 0
 #define UPDATE_DATA 1
@@ -18,14 +21,15 @@ time_t dstOffset = 0;
 long timerPress;
 long lastDraw = 0;
 uint16_t screen = INIT_WIFI;
-String moonAgeImage = "";
+int16_t offsetX = 0;
 uint8_t moonAge = 0;
-TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
+bool flag = true;
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite img = TFT_eSprite(&tft);
 simpleDSTadjust dstAdjusted(StartRule, EndRule);
 OpenWeatherMapCurrentData currentWeather;
 OpenWeatherMapForecastData forecasts[MAX_FORECASTS];
 Astronomy::MoonData moonData;
-
 // 连接wifi
 void connectWifi()
 {
@@ -58,7 +62,6 @@ void connectWifi()
 // 初始化显示屏
 void initDisplay()
 {
-
   tft.begin();
   tft.setRotation(2);
   tft.fillScreen(0x6E8A);
@@ -144,14 +147,14 @@ void loadData()
 
   updateDataState(80, "Updating astronomy...");
   Astronomy *astronomy = new Astronomy();
-  moonData = astronomy->calculateMoonData(time(nullptr));
+  char *dstAbbrev;
+  time_t now = dstAdjusted.time(&dstAbbrev);
+  struct tm *timeinfo = localtime(&now);
+  moonData = astronomy->calculateMoonData(timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday);
   float lunarMonth = 29.53;
   moonAge = moonData.phase <= 4 ? lunarMonth * moonData.illumination / 2 : lunarMonth - moonData.illumination * lunarMonth / 2;
-  moonAgeImage = String((char)(65 + ((uint8_t)((26 * moonAge / 30) % 26))));
-  delete astronomy;
-  astronomy = nullptr;
-
   updateDataState(100, "Data ready~!");
+  offsetX = 0;
   updateView();
 }
 
@@ -198,10 +201,22 @@ void updateView()
   drawCurrentWeather();
   updateDate();
   updateTime();
-  int x = 0, y = 0;
-  drawForecastDetail(x + 10, y + 180, 0);
-  drawForecastDetail(x + 95, y + 180, 1);
-  drawForecastDetail(x + 180, y + 180, 2);
+  flashScrollingArea(flag);
+}
+
+void flashScrollingArea(bool flag)
+{
+  tft.fillRect(0, 145, 240, 180, TFT_BLACK);
+  if (flag)
+  {
+    drawForecastDetail(0);
+    drawForecastDetail(1);
+    drawForecastDetail(2);
+  }
+  else
+  {
+    drawAstronomy();
+  }
 }
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap)
@@ -242,21 +257,12 @@ void drawWifiQuality()
   {
     color = TFT_RED;
   }
-  tft.setTextDatum(TL_DATUM);
-  tft.setFreeFont(&FreeSans9pt7b);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(String(quality) + "%", 20, 5);
-  for (int8_t i = 0; i < 4; i++)
+  int8_t level = 5;
+  int8_t showLevels = quality / 20;
+  for (int8_t i = 0; i < level; i++)
   {
-    for (int8_t j = 0; j < 2 * (i + 1); j++)
-    {
-      if (quality > i * 25 || j == 0)
-      {
-
-        tft.drawRect(4 * i, 0 + 5, 1, 18, TFT_BLACK);
-        tft.fillRect(4 * i, j + 5, 1, 18 - j, color);
-      }
-    }
+    tft.drawRect(5 * i, 5, 2, 18, TFT_BLACK);
+    tft.fillRect(5 * i, i * 3 + 5, 2, 15 - (i * 3) + 3, i + 1 > level - showLevels ? color : TFT_NAVY);
   }
 }
 
@@ -327,15 +333,18 @@ void drawCurrentWeather()
   drawTemp(currentWeather.temp);
 }
 
-void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex)
+void drawForecastDetail(uint8_t dayIndex)
 {
-  tft.setTextColor(TEXT_COLOR, TFT_BLACK);
-  tft.setFreeFont(&FreeSansBold9pt7b);
-  tft.setTextDatum(CC_DATUM);
+  uint16_t y = 180;
+  img.createSprite(80, 55);
+  img.fillSprite(TFT_BLACK);
+  img.setTextColor(TEXT_COLOR, TFT_BLACK);
+  img.setFreeFont(&FreeSansBold9pt7b);
+  img.setTextDatum(MC_DATUM);
   time_t time = forecasts[dayIndex].observationTime + dstOffset;
   struct tm *timeinfo = localtime(&time);
-  tft.drawString(WDAY_NAMES[timeinfo->tm_wday], x + 25, y - 27);
-  tft.drawString(String(timeinfo->tm_hour) + ":00", x + 25, y - 8);
+  img.drawString(String(WDAY_NAMES[timeinfo->tm_wday]), 40, 5);
+  img.drawString(String(timeinfo->tm_hour) + ":00", 40, 24);
 
   uint16_t color = 0xEE60;
   if (forecasts[dayIndex].temp > 25)
@@ -346,35 +355,143 @@ void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex)
   {
     color = 0xBEDD;
   }
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(String(forecasts[dayIndex].temp, 1) + "'C", x + 25, y + 13);
+  img.setTextColor(color);
+  img.drawString(String(forecasts[dayIndex].temp, 1) + "'C", 40, 43);
+
+  img.pushSprite(dayIndex * 80 + offsetX, 145);
+  img.deleteSprite();
 
   TJpgDec.setJpgScale(4);
   TJpgDec.setSwapBytes(true);
 
+  uint8_t iconX = dayIndex * 80 + offsetX + 26;
   String iconText = forecasts[dayIndex].icon;
   if (iconText == "01d" || iconText == "01n")
-    TJpgDec.drawJpg(x + 8, y + 23, sunny, sizeof(sunny));
+    TJpgDec.drawJpg(iconX, y + 23, sunny, sizeof(sunny));
   else if (iconText == "02d" || iconText == "02n")
-    TJpgDec.drawJpg(x + 8, y + 23, partlysunny, sizeof(partlysunny));
+    TJpgDec.drawJpg(iconX, y + 23, partlysunny, sizeof(partlysunny));
   else if (iconText == "03d" || iconText == "03n")
-    TJpgDec.drawJpg(x + 8, y + 23, partlycloudy, sizeof(partlycloudy));
+    TJpgDec.drawJpg(iconX, y + 23, partlycloudy, sizeof(partlycloudy));
   else if (iconText == "04d" || iconText == "04n")
-    TJpgDec.drawJpg(x + 8, y + 23, mostlycloudy, sizeof(mostlycloudy));
+    TJpgDec.drawJpg(iconX, y + 23, mostlycloudy, sizeof(mostlycloudy));
   else if (iconText == "09d" || iconText == "09n" || iconText == "10d" || iconText == "10n")
-    TJpgDec.drawJpg(x + 8, y + 23, rain, sizeof(rain));
+    TJpgDec.drawJpg(iconX, y + 23, rain, sizeof(rain));
   else if (iconText == "11d" || iconText == "11n")
-    TJpgDec.drawJpg(x + 8, y + 23, tstorms, sizeof(tstorms));
+    TJpgDec.drawJpg(iconX, y + 23, tstorms, sizeof(tstorms));
   else if (iconText == "13d" || iconText == "13n")
-    TJpgDec.drawJpg(x + 8, y + 23, snow, sizeof(snow));
+    TJpgDec.drawJpg(iconX, y + 23, snow, sizeof(snow));
   else if (iconText == "50d" || iconText == "50n")
-    TJpgDec.drawJpg(x + 8, y + 23, fog, sizeof(fog));
+    TJpgDec.drawJpg(iconX, y + 23, fog, sizeof(fog));
   else
-    TJpgDec.drawJpg(x + 8, y + 23, sunny, sizeof(sunny));
+    TJpgDec.drawJpg(iconX, y + 23, sunny, sizeof(sunny));
 }
 
+String getTime(int hour, int min)
+{
+  char buf[6];
+  sprintf(buf, "%02d:%02d", hour, min);
+  return String(buf);
+}
+
+String getTime(time_t *timestamp)
+{
+  struct tm *timeInfo = gmtime(timestamp);
+  char buf[6];
+  sprintf(buf, "%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min);
+  return String(buf);
+}
+
+void drawSunInfo()
+{
+  uint16_t y = 155;
+  uint16_t x = offsetX;
+  img.createSprite(90, 55);
+  img.fillSprite(TFT_BLACK);
+  img.setTextColor(0xBEDD, TFT_BLACK);
+  img.setFreeFont(&FreeSansBold9pt7b);
+  img.setTextDatum(MC_DATUM);
+  img.drawString("Sun", 45, 5);
+  time_t time = currentWeather.sunrise + dstOffset;
+  img.setTextColor(TEXT_COLOR, TFT_BLACK);
+  img.drawString(getTime(&time), 45, 26);
+  time = currentWeather.sunset + dstOffset;
+  img.drawString(getTime(&time), 45, 43);
+  img.pushSprite(x, y);
+  img.deleteSprite();
+}
+
+void drawMoonInfo()
+{
+  uint16_t y = 155;
+  uint16_t x = 150 + offsetX;
+  img.createSprite(90, 55);
+  img.fillSprite(TFT_BLACK);
+  img.setTextColor(0xBEDD, TFT_BLACK);
+  img.setFreeFont(&FreeSansBold9pt7b);
+  img.setTextDatum(MC_DATUM);
+  img.drawString("Moon", 45, 5);
+  img.setTextColor(TEXT_COLOR, TFT_BLACK);
+  char *dstAbbrev;
+  time_t now = dstAdjusted.time(&dstAbbrev);
+  struct tm *timeinfo = localtime(&now);
+  Ephemeris::setLocationOnEarth(currentWeather.lat, currentWeather.lon);
+  Serial.print("  curr: ");
+  Serial.print(timeinfo->tm_year);
+  Serial.print("/");
+  Serial.print(timeinfo->tm_mon + 1);
+  Serial.print("/");
+  Serial.print(timeinfo->tm_mday);
+  SolarSystemObject moon = Ephemeris::solarSystemObjectAtDateAndTime(EARTHMOON,
+                                                                     timeinfo->tm_mday,
+                                                                     timeinfo->tm_mon + 1, timeinfo->tm_year + 1900,
+                                                                     0, 0, 0);
+  int hours, minutes;
+  float seconds;
+  Ephemeris::floatingHoursToHoursMinutesSeconds(Ephemeris::floatingHoursWithUTCOffset(moon.rise, UTC_OFFSET), &hours, &minutes, &seconds);
+  img.drawString(getTime(hours, minutes), 45, 26);
+  Serial.print("  Moonrise: ");
+  Serial.print(hours);
+  Serial.print("h");
+  Serial.print(minutes);
+  Serial.print("m");
+  Serial.print(seconds, 0);
+  Serial.println("s");
+  Ephemeris::floatingHoursToHoursMinutesSeconds(Ephemeris::floatingHoursWithUTCOffset(moon.set, UTC_OFFSET), &hours, &minutes, &seconds);
+  img.drawString(getTime(hours, minutes), 45, 43);
+  Serial.print("  Moonset: ");
+  Serial.print(hours);
+  Serial.print("h");
+  Serial.print(minutes);
+  Serial.print("m");
+  Serial.print(seconds, 0);
+  Serial.println("s");
+  img.pushSprite(x, y);
+  img.deleteSprite();
+}
+
+void drawAstronomy()
+{
+  uint16_t y = 150;
+  uint16_t x = 90 + offsetX;
+  TJpgDec.setJpgScale(1);
+  TJpgDec.setSwapBytes(true);
+  int moonAgeImage = 24 * moonAge / 30.0;
+  drawMoonImg(x, y, moonAgeImage);
+  drawSunInfo();
+  drawMoonInfo();
+}
+
+int32_t pos = 0;
+long lastScrollDraw = 0;
 void loop()
 {
+  if (millis() - lastScrollDraw > 1000 * 30)
+  {
+    // offsetX += 3;
+    flashScrollingArea(flag);
+    flag = !flag;
+    lastScrollDraw = millis();
+  }
   if ((millis() - lastDraw > drawDST) && screen == UPDATE_VIEW)
   {
     lastDraw = millis();
